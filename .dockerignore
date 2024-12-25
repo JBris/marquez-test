@@ -1,0 +1,6 @@
+*.md
+.*
+Dockerfile
+api/build
+docs
+web/node_modules

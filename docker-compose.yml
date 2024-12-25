@@ -1,0 +1,144 @@
+version: "3.7"
+services:
+
+  minio:
+    image: minio/minio:RELEASE.2023-05-27T05-56-19Z
+    restart: always
+    stop_grace_period: 10s
+    working_dir: /data
+    volumes:
+      - minio-data:/data
+    ports:
+      - 9000:9000
+      - 9001:9001
+    environment:
+      MINIO_ACCESS_KEY: user
+      MINIO_SECRET_KEY: password
+      MINIO_ROOT_USER: user
+      MINIO_ROOT_PASSWORD: password
+      MINIO_STORAGE_USE_HTTPS: False
+      MINIO_PROMETHEUS_AUTH_TYPE: public
+    command: server --console-address :9001 --address :9000 /data
+
+  mc:
+    image: minio/mc:RELEASE.2023-05-30T22-41-38Z
+    environment:
+      MINIO_PORT: 9000
+      MINIO_ACCESS_KEY: user
+      MINIO_SECRET_KEY: password
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c ' sleep 5; /usr/bin/mc config host add s3 http://minio:9000 user password --api S3v4; [[ ! -z "`/usr/bin/mc ls s3 | grep challenge`" ]] || /usr/bin/mc mb s3/mlflow;  /usr/bin/mc policy download s3/mlflow; [[ ! -z "`/usr/bin/mc ls s3 | grep challenge`" ]] || /usr/bin/mc mb s3/data;  /usr/bin/mc policy download s3/data; exit 0; '
+
+  api:
+    image: "marquezproject/marquez:${TAG}"
+    container_name: marquez-api
+    environment:
+      - MARQUEZ_PORT=${API_PORT}
+      - MARQUEZ_ADMIN_PORT=${API_ADMIN_PORT}
+      - POSTGRES_HOST=db
+      - SEARCH_ENABLED=${SEARCH_ENABLED}
+    ports:
+      - "${API_PORT}:${API_PORT}"
+      - "${API_ADMIN_PORT}:${API_ADMIN_PORT}"
+    volumes:
+      - ./docker:/opt/marquez
+    links:
+      - "db:postgres"
+    depends_on:
+      - db
+    entrypoint: [ "/opt/marquez/wait-for-it.sh", "db:${POSTGRES_PORT}", "--", "/opt/marquez/wait-for-it.sh", "opensearch:${SEARCH_PORT}", "--", "./entrypoint.sh" ]
+
+  db:
+    image: postgres:14
+    container_name: marquez-db
+    ports:
+      - "${POSTGRES_PORT}:${POSTGRES_PORT}"
+    environment:
+      - POSTGRES_USER=marquez
+      - POSTGRES_PASSWORD=marquez
+      - POSTGRES_DB=marquez
+      - MARQUEZ_DB=marquez
+      - MARQUEZ_USER=marquez
+      - MARQUEZ_PASSWORD=marquez
+    volumes:
+      - db-conf:/etc/postgresql
+      - db-backup:/var/lib/postgresql/data
+
+  web:
+    image: "marquezproject/marquez-web:${TAG}"
+    container_name: marquez-web
+    build:
+      context: .
+      args:
+        REACT_APP_ADVANCED_SEARCH: ${SEARCH_ENABLED}
+    environment:
+      - MARQUEZ_HOST=api
+      - MARQUEZ_PORT=${API_PORT}
+      - WEB_PORT=${WEB_PORT}
+      - REACT_APP_ADVANCED_SEARCH=${SEARCH_ENABLED}
+    ports:
+      - "${WEB_PORT}:${WEB_PORT}"
+    depends_on:
+      - api
+
+  seed_marquez:
+    image: "marquezproject/marquez:${TAG}"
+    container_name: seed-marquez-with-metadata
+    environment:
+      - MARQUEZ_URL=http://api:${API_PORT}
+      - SEARCH_ENABLED=false
+    volumes:
+      - ./docker/wait-for-it.sh:/usr/src/app/wait-for-it.sh
+      - ./docker/seed.sh:/usr/src/app/seed.sh
+      - ./docker/metadata.template.json:/usr/src/app/metadata.template.json
+    links:
+      - "db:postgres"
+    depends_on:
+      - api
+    entrypoint: [ "./wait-for-it.sh", "api:${API_PORT}", "--timeout=120", "--", "./seed.sh" ]
+
+  opensearch:
+    image: opensearchproject/opensearch:2.5.0
+    container_name: marquez-search
+    hostname: opensearch
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    environment:
+      - cluster.name=opensearch-cluster
+      - node.name=opensearch
+      - discovery.seed_hosts=opensearch
+      - cluster.initial_cluster_manager_nodes=opensearch
+      - bootstrap.memory_lock=true
+      - plugins.security.ssl.http.enabled=false
+      - "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m"
+      - OPENSEARCH_PASSWORD=admin
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+    cap_add:
+      - IPC_LOCK
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+
+  pghero:
+    image: ankane/pghero
+    container_name: pghero
+    ports:
+      - "8080:8080"
+    environment:
+      DATABASE_URL: postgres://marquez:marquez@marquez:${POSTGRES_PORT}
+
+volumes:
+  data:
+  db-conf:
+  db-init:
+  db-backup:
+  opensearch-data:
+  minio-data:
